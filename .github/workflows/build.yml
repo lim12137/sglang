@@ -50,16 +50,18 @@ jobs:
       asr_tag: ${{ steps.tags.outputs.asr_tag }}
       sglang_base: ${{ steps.tags.outputs.sglang_base }}
       cann_base: ${{ steps.tags.outputs.cann_base }}
+      has_acr: ${{ steps.tags.outputs.has_acr }}
     steps:
       - name: Resolve time tag and upstream
         id: tags
+        env:
+          ACR_PWD: ${{ secrets.ALIYUN_ACR_PWD }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.time_tag }}" ]; then
             TIME_TAG="${{ github.event.inputs.time_tag }}"
           else
             TIME_TAG="$(date -u +%Y%m%d-%H%M%S)"
           fi
-          # 清洗：只保留 tag 安全字符
           TIME_TAG="$(echo "$TIME_TAG" | tr -cd 'A-Za-z0-9._-')"
           if [ -z "$TIME_TAG" ]; then
             TIME_TAG="$(date -u +%Y%m%d-%H%M%S)"
@@ -80,12 +82,20 @@ jobs:
           BASE_TAG="$TIME_TAG"
           ASR_TAG="${TIME_TAG}-asr"
 
+          if [ -n "$ACR_PWD" ]; then
+            HAS_ACR=true
+          else
+            HAS_ACR=false
+            echo "::warning::ALIYUN_ACR_PWD secret is empty; will push GHCR only"
+          fi
+
           {
             echo "time_tag=$TIME_TAG"
             echo "base_tag=$BASE_TAG"
             echo "asr_tag=$ASR_TAG"
             echo "sglang_base=$SGLANG_BASE"
             echo "cann_base=$CANN_BASE"
+            echo "has_acr=$HAS_ACR"
           } >> "$GITHUB_OUTPUT"
 
           echo "TIME_TAG=$TIME_TAG"
@@ -93,6 +103,7 @@ jobs:
           echo "ASR_TAG=$ASR_TAG"
           echo "SGLANG_BASE=$SGLANG_BASE"
           echo "CANN_BASE=$CANN_BASE"
+          echo "HAS_ACR=$HAS_ACR"
 
   build-base:
     needs: resolve-tags
@@ -143,11 +154,33 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Aliyun ACR
+        if: ${{ needs.resolve-tags.outputs.has_acr == 'true' }}
         uses: docker/login-action@v3
         with:
           registry: ${{ env.ACR_REGISTRY }}
           username: hopemyl
           password: ${{ secrets.ALIYUN_ACR_PWD }}
+
+      - name: Compose image tags (base)
+        id: tags
+        run: |
+          OWNER="${{ github.repository_owner }}"
+          TAG="${{ needs.resolve-tags.outputs.base_tag }}"
+          {
+            echo "ghcr.io/${OWNER}/${{ env.IMAGE_NAME }}:${TAG}"
+            echo "ghcr.io/${OWNER}/${{ env.IMAGE_NAME }}:latest"
+          } > /tmp/tags.txt
+          if [ "${{ needs.resolve-tags.outputs.has_acr }}" = "true" ]; then
+            {
+              echo "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:${TAG}"
+              echo "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest"
+            } >> /tmp/tags.txt
+          fi
+          echo "tags<<EOF" >> "$GITHUB_OUTPUT"
+          cat /tmp/tags.txt >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "Will push tags:"
+          cat /tmp/tags.txt
 
       - name: Build and push SGLang base (time tag)
         uses: docker/build-push-action@v6
@@ -158,11 +191,7 @@ jobs:
           build-args: |
             SGLANG_BASE=${{ needs.resolve-tags.outputs.sglang_base }}
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-tags.outputs.base_tag }}
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-tags.outputs.base_tag }}
-            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest
+          tags: ${{ steps.tags.outputs.tags }}
           labels: |
             org.opencontainers.image.created=${{ needs.resolve-tags.outputs.time_tag }}
             sglang.image.role=base
@@ -217,11 +246,33 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Aliyun ACR
+        if: ${{ needs.resolve-tags.outputs.has_acr == 'true' }}
         uses: docker/login-action@v3
         with:
           registry: ${{ env.ACR_REGISTRY }}
           username: hopemyl
           password: ${{ secrets.ALIYUN_ACR_PWD }}
+
+      - name: Compose image tags (asr)
+        id: tags
+        run: |
+          OWNER="${{ github.repository_owner }}"
+          TAG="${{ needs.resolve-tags.outputs.asr_tag }}"
+          {
+            echo "ghcr.io/${OWNER}/${{ env.IMAGE_NAME }}:${TAG}"
+            echo "ghcr.io/${OWNER}/${{ env.IMAGE_NAME }}:latest-asr"
+          } > /tmp/tags.txt
+          if [ "${{ needs.resolve-tags.outputs.has_acr }}" = "true" ]; then
+            {
+              echo "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:${TAG}"
+              echo "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest-asr"
+            } >> /tmp/tags.txt
+          fi
+          echo "tags<<EOF" >> "$GITHUB_OUTPUT"
+          cat /tmp/tags.txt >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "Will push tags:"
+          cat /tmp/tags.txt
 
       - name: Build and push ASR image (time-asr tag)
         uses: docker/build-push-action@v6
@@ -232,11 +283,7 @@ jobs:
           build-args: |
             CANN_BASE=${{ needs.resolve-tags.outputs.cann_base }}
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-tags.outputs.asr_tag }}
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest-asr
-            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-tags.outputs.asr_tag }}
-            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest-asr
+          tags: ${{ steps.tags.outputs.tags }}
           labels: |
             org.opencontainers.image.created=${{ needs.resolve-tags.outputs.time_tag }}
             sglang.image.role=asr
