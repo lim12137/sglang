@@ -1,12 +1,18 @@
-# SGLang 基础镜像：跟踪上游最新（可覆盖）
-# CANN 线默认：lmsysorg/sglang:main-cann8.5.0-910b
-# CUDA 线可覆盖为：lmsysorg/sglang:latest
+# SGLang 基础镜像：跟踪 CANN 8.5 线「最新动态」上游
+# 默认上游滚动 tag：lmsysorg/sglang:main-cann8.5.0-910b
+# 发布时由 CI 打 UTC 时间 tag（YYYYMMDD-HHMMSS）+ latest
 ARG SGLANG_BASE=lmsysorg/sglang:main-cann8.5.0-910b
 FROM ${SGLANG_BASE}
 
-LABEL org.opencontainers.image.title="sglang-base" \
-      org.opencontainers.image.description="SGLang base image (upstream latest line; publish with time tag)" \
-      sglang.image.role="base"
+ARG UPSTREAM_REF=lmsysorg/sglang:main-cann8.5.0-910b
+ARG BUILD_TIME_TAG=unknown
+
+LABEL org.opencontainers.image.title="sglang-cann85-base" \
+      org.opencontainers.image.description="SGLang CANN 8.5 latest dynamic base; published with time tags" \
+      sglang.image.role="base" \
+      sglang.cann.line="8.5" \
+      sglang.upstream.ref="${UPSTREAM_REF}" \
+      sglang.build.time_tag="${BUILD_TIME_TAG}"
 
 WORKDIR /sgl-workspace
 CMD ["/bin/bash"]

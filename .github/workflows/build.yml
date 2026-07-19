@@ -1,4 +1,4 @@
-name: Build SGLang Images (latest upstream, time tags)
+name: Build SGLang CANN 8.5 Images (latest dynamic + time tags)
 
 on:
   workflow_dispatch:
@@ -7,29 +7,25 @@ on:
         description: "可选：覆盖时间 tag（默认 UTC YYYYMMDD-HHMMSS）"
         required: false
         default: ""
+      cann_line:
+        description: "CANN 线匹配（用于解析最新动态上游）"
+        required: false
+        default: "cann8.5"
+      device:
+        description: "设备后缀：910b 或 a3"
+        required: false
+        default: "910b"
       sglang_base:
-        description: "SGLang 基础上游镜像"
+        description: "可选：手动指定上游（空则自动解析 main-cann8.5*-device）"
         required: false
-        default: "lmsysorg/sglang:main-cann8.5.0-910b"
-      omni_base:
-        description: "ASR 专用上游（SGLang-Omni，对齐 MOSS cookbook）"
-        required: false
-        default: "lmsysorg/sglang-omni:latest"
-      base_platform:
-        description: "基础镜像平台"
-        required: false
-        default: "linux/arm64"
-      asr_platform:
-        description: "ASR 镜像平台（官方 cookbook 为 NVIDIA/CUDA，默认 amd64）"
-        required: false
-        default: "linux/amd64"
+        default: ""
       build_base:
-        description: "构建 SGLang 基础镜像"
+        description: "构建基础镜像（CANN 8.5 最新动态）"
         type: boolean
         required: false
         default: true
       build_asr:
-        description: "构建 ASR 专用镜像（-asr / MOSS-Transcribe-Diarize）"
+        description: "构建 ASR 镜像（同后端，tag 带 -asr）"
         type: boolean
         required: false
         default: true
@@ -43,13 +39,11 @@ on:
       - ".github/workflows/build.yml"
 
 env:
-  DEFAULT_SGLANG_BASE: lmsysorg/sglang:main-cann8.5.0-910b
-  DEFAULT_OMNI_BASE: lmsysorg/sglang-omni:latest
-  DEFAULT_BASE_PLATFORM: linux/arm64
-  DEFAULT_ASR_PLATFORM: linux/amd64
+  # 动态最新：官方滚动 tag 形式 main-cann8.5.0-910b
+  FALLBACK_SGLANG_BASE: lmsysorg/sglang:main-cann8.5.0-910b
   ACR_REGISTRY: crpi-fs24haezdztsodhc.cn-guangzhou.personal.cr.aliyuncs.com
   ACR_NAMESPACE: hopemyl
-  IMAGE_NAME: sglang-cann
+  IMAGE_NAME: sglang
 
 jobs:
   resolve-tags:
@@ -59,16 +53,17 @@ jobs:
       base_tag: ${{ steps.tags.outputs.base_tag }}
       asr_tag: ${{ steps.tags.outputs.asr_tag }}
       sglang_base: ${{ steps.tags.outputs.sglang_base }}
-      omni_base: ${{ steps.tags.outputs.omni_base }}
       base_platform: ${{ steps.tags.outputs.base_platform }}
-      asr_platform: ${{ steps.tags.outputs.asr_platform }}
       has_acr: ${{ steps.tags.outputs.has_acr }}
+      upstream_digest: ${{ steps.tags.outputs.upstream_digest }}
     steps:
-      - name: Resolve time tag and upstream
+      - name: Resolve CANN 8.5 latest dynamic upstream + time tag
         id: tags
         env:
           ACR_PWD: ${{ secrets.ALIYUN_ACR_PWD }}
         run: |
+          set -euo pipefail
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.time_tag }}" ]; then
             TIME_TAG="${{ github.event.inputs.time_tag }}"
           else
@@ -79,34 +74,80 @@ jobs:
             TIME_TAG="$(date -u +%Y%m%d-%H%M%S)"
           fi
 
+          CANN_LINE="cann8.5"
+          DEVICE="910b"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            [ -n "${{ github.event.inputs.cann_line }}" ] && CANN_LINE="${{ github.event.inputs.cann_line }}"
+            [ -n "${{ github.event.inputs.device }}" ] && DEVICE="${{ github.event.inputs.device }}"
+          fi
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.sglang_base }}" ]; then
             SGLANG_BASE="${{ github.event.inputs.sglang_base }}"
           else
-            SGLANG_BASE="${{ env.DEFAULT_SGLANG_BASE }}"
+            # 动态最新：优先 main-${CANN_LINE}*-${DEVICE}
+            # 例：main-cann8.5.0-910b
+            TOKEN="$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:lmsysorg/sglang:pull" | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')"
+            TAGS_JSON="$(curl -fsSL -H "Authorization: Bearer ${TOKEN}" https://registry-1.docker.io/v2/lmsysorg/sglang/tags/list)"
+            SGLANG_BASE="$(python3 - <<PY
+import json, os, re
+data = json.loads('''${TAGS_JSON}''')
+tags = data.get("tags") or []
+cann = os.environ.get("CANN_LINE", "cann8.5")
+device = os.environ.get("DEVICE", "910b")
+# 1) rolling main-cann8.5.x-device
+main_pat = re.compile(rf"^main-{re.escape(cann)}[0-9.]*-{re.escape(device)}$")
+mains = sorted([t for t in tags if main_pat.match(t)])
+if mains:
+    # 取字典序最后（8.5.0 通常唯一）
+    print(f"lmsysorg/sglang:{mains[-1]}")
+else:
+    # 2) 最高版本 v*-cann8.5*-device
+    ver_pat = re.compile(rf"^v([0-9]+(?:\.[0-9]+)*(?:\.post[0-9]+)?(?:rc[0-9]+)?)-{re.escape(cann)}[0-9.]*-{re.escape(device)}$")
+    scored = []
+    for t in tags:
+        m = ver_pat.match(t)
+        if not m:
+            continue
+        scored.append(t)
+    if scored:
+        # 简单按字符串排序不够；用 packaging 不可用时用自定义
+        def key(t):
+            body = t[1:].split("-")[0]  # 0.5.12.post1
+            parts = body.replace(".post", ".post.").split(".")
+            out = []
+            for p in parts:
+                if p.startswith("post"):
+                    out.append((1, int(p[4:] or 0)))
+                elif p.startswith("rc"):
+                    out.append((0, int(p[2:] or 0)))
+                else:
+                    try:
+                        out.append((2, int(p)))
+                    except ValueError:
+                        out.append((2, 0))
+            return out
+        best = sorted(scored, key=key)[-1]
+        print(f"lmsysorg/sglang:{best}")
+    else:
+        print(os.environ.get("FALLBACK", "lmsysorg/sglang:main-cann8.5.0-910b"))
+PY
+)"
           fi
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.omni_base }}" ]; then
-            OMNI_BASE="${{ github.event.inputs.omni_base }}"
-          else
-            OMNI_BASE="${{ env.DEFAULT_OMNI_BASE }}"
+          # 解析 digest 便于追溯
+          DIGEST="$(docker buildx imagetools inspect "$SGLANG_BASE" --format '{{if .Manifest.Digest}}{{.Manifest.Digest}}{{else}}{{json .}}{{end}}' 2>/dev/null || true)"
+          if [ -z "$DIGEST" ] || echo "$DIGEST" | grep -q '{'; then
+            DIGEST="$(docker buildx imagetools inspect "$SGLANG_BASE" --format '{{json .Manifest}}' | python3 -c 'import sys,json; m=json.load(sys.stdin); print(m.get("digest",""))' 2>/dev/null || true)"
           fi
+          [ -n "$DIGEST" ] || DIGEST="unknown"
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.base_platform }}" ]; then
-            BASE_PLATFORM="${{ github.event.inputs.base_platform }}"
-          else
-            BASE_PLATFORM="${{ env.DEFAULT_BASE_PLATFORM }}"
-          fi
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.asr_platform }}" ]; then
-            ASR_PLATFORM="${{ github.event.inputs.asr_platform }}"
-          else
-            ASR_PLATFORM="${{ env.DEFAULT_ASR_PLATFORM }}"
-          fi
+          # 平台：CANN 910b 镜像多为 multi-arch；默认 arm64（昇腾服务器）
+          BASE_PLATFORM="linux/arm64"
 
           BASE_TAG="$TIME_TAG"
           ASR_TAG="${TIME_TAG}-asr"
 
-          if [ -n "$ACR_PWD" ]; then
+          if [ -n "${ACR_PWD:-}" ]; then
             HAS_ACR=true
           else
             HAS_ACR=false
@@ -118,15 +159,19 @@ jobs:
             echo "base_tag=$BASE_TAG"
             echo "asr_tag=$ASR_TAG"
             echo "sglang_base=$SGLANG_BASE"
-            echo "omni_base=$OMNI_BASE"
             echo "base_platform=$BASE_PLATFORM"
-            echo "asr_platform=$ASR_PLATFORM"
             echo "has_acr=$HAS_ACR"
+            echo "upstream_digest=$DIGEST"
           } >> "$GITHUB_OUTPUT"
 
-          echo "TIME_TAG=$TIME_TAG BASE_TAG=$BASE_TAG ASR_TAG=$ASR_TAG"
-          echo "SGLANG_BASE=$SGLANG_BASE OMNI_BASE=$OMNI_BASE"
-          echo "BASE_PLATFORM=$BASE_PLATFORM ASR_PLATFORM=$ASR_PLATFORM HAS_ACR=$HAS_ACR"
+          echo "TIME_TAG=$TIME_TAG"
+          echo "SGLANG_BASE=$SGLANG_BASE"
+          echo "UPSTREAM_DIGEST=$DIGEST"
+          echo "BASE_TAG=$BASE_TAG ASR_TAG=$ASR_TAG HAS_ACR=$HAS_ACR"
+        env:
+          CANN_LINE: ${{ github.event.inputs.cann_line || 'cann8.5' }}
+          DEVICE: ${{ github.event.inputs.device || '910b' }}
+          FALLBACK: ${{ env.FALLBACK_SGLANG_BASE }}
 
   build-base:
     needs: resolve-tags
@@ -145,31 +190,16 @@ jobs:
           sudo docker system prune --all --force || true
           df -h /
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64,amd64
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Verify upstream base
+      - name: Verify upstream
         run: |
-          docker buildx imagetools inspect "${{ needs.resolve-tags.outputs.sglang_base }}" --format '{{json .Manifest}}' > /tmp/manifest.json
-          python3 - <<'PY'
-          import json, os
-          want = os.environ["PLATFORM"]
-          os_name, arch = want.split("/", 1)
-          with open("/tmp/manifest.json", encoding="utf-8") as f:
-              m = json.load(f)
-          platforms = [i.get("platform", {}) for i in m.get("manifests", [])]
-          if m.get("manifests"):
-              ok = any(p.get("os") == os_name and p.get("architecture") == arch for p in platforms)
-              if not ok:
-                  print("WARN: multi-arch manifest missing", want, "digest", m.get("digest"))
-          print("BASE_UPSTREAM_OK", m.get("digest", "single-manifest"))
-          PY
-        env:
-          PLATFORM: ${{ needs.resolve-tags.outputs.base_platform }}
+          docker buildx imagetools inspect "${{ needs.resolve-tags.outputs.sglang_base }}"
+          echo "Using upstream digest ${{ needs.resolve-tags.outputs.upstream_digest }}"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -194,11 +224,13 @@ jobs:
           {
             echo "ghcr.io/${OWNER}/${{ env.IMAGE_NAME }}:${TAG}"
             echo "ghcr.io/${OWNER}/${{ env.IMAGE_NAME }}:latest"
+            echo "ghcr.io/${OWNER}/${{ env.IMAGE_NAME }}:cann8.5-latest"
           } > /tmp/tags.txt
           if [ "${{ needs.resolve-tags.outputs.has_acr }}" = "true" ]; then
             {
               echo "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:${TAG}"
               echo "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest"
+              echo "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:cann8.5-latest"
             } >> /tmp/tags.txt
           fi
           echo "tags<<EOF" >> "$GITHUB_OUTPUT"
@@ -206,7 +238,7 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
           cat /tmp/tags.txt
 
-      - name: Build and push base
+      - name: Build and push base (time tag)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -214,14 +246,18 @@ jobs:
           platforms: ${{ needs.resolve-tags.outputs.base_platform }}
           build-args: |
             SGLANG_BASE=${{ needs.resolve-tags.outputs.sglang_base }}
+            UPSTREAM_REF=${{ needs.resolve-tags.outputs.sglang_base }}
+            BUILD_TIME_TAG=${{ needs.resolve-tags.outputs.time_tag }}
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           labels: |
             org.opencontainers.image.created=${{ needs.resolve-tags.outputs.time_tag }}
             sglang.image.role=base
-            sglang.upstream=${{ needs.resolve-tags.outputs.sglang_base }}
-          cache-from: type=gha,scope=sglang-base
-          cache-to: type=gha,mode=min,scope=sglang-base
+            sglang.cann.line=8.5
+            sglang.upstream.ref=${{ needs.resolve-tags.outputs.sglang_base }}
+            sglang.upstream.digest=${{ needs.resolve-tags.outputs.upstream_digest }}
+          cache-from: type=gha,scope=sglang-cann85-base
+          cache-to: type=gha,mode=min,scope=sglang-cann85-base
 
   build-asr:
     needs: resolve-tags
@@ -240,22 +276,11 @@ jobs:
           sudo docker system prune --all --force || true
           df -h /
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64,amd64
 
       - uses: docker/setup-buildx-action@v3
-
-      - name: Verify Omni upstream
-        run: |
-          docker buildx imagetools inspect "${{ needs.resolve-tags.outputs.omni_base }}" --format '{{json .Manifest}}' > /tmp/omni.json
-          python3 - <<'PY'
-          import json
-          with open("/tmp/omni.json", encoding="utf-8") as f:
-              m = json.load(f)
-          print("OMNI_UPSTREAM_OK", m.get("digest", "single-manifest"), "keys", list(m.keys())[:8])
-          PY
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -280,11 +305,13 @@ jobs:
           {
             echo "ghcr.io/${OWNER}/${{ env.IMAGE_NAME }}:${TAG}"
             echo "ghcr.io/${OWNER}/${{ env.IMAGE_NAME }}:latest-asr"
+            echo "ghcr.io/${OWNER}/${{ env.IMAGE_NAME }}:cann8.5-latest-asr"
           } > /tmp/tags.txt
           if [ "${{ needs.resolve-tags.outputs.has_acr }}" = "true" ]; then
             {
               echo "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:${TAG}"
               echo "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest-asr"
+              echo "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:cann8.5-latest-asr"
             } >> /tmp/tags.txt
           fi
           echo "tags<<EOF" >> "$GITHUB_OUTPUT"
@@ -292,20 +319,23 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
           cat /tmp/tags.txt
 
-      - name: Build and push ASR (MOSS-Transcribe-Diarize)
+      - name: Build and push ASR (same CANN 8.5 backend, time-asr tag)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile.asr
-          platforms: ${{ needs.resolve-tags.outputs.asr_platform }}
+          platforms: ${{ needs.resolve-tags.outputs.base_platform }}
           build-args: |
-            SGLANG_OMNI_BASE=${{ needs.resolve-tags.outputs.omni_base }}
+            SGLANG_BASE=${{ needs.resolve-tags.outputs.sglang_base }}
+            UPSTREAM_REF=${{ needs.resolve-tags.outputs.sglang_base }}
+            BUILD_TIME_TAG=${{ needs.resolve-tags.outputs.time_tag }}
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           labels: |
             org.opencontainers.image.created=${{ needs.resolve-tags.outputs.time_tag }}
             sglang.image.role=asr
-            sglang.omni.upstream=${{ needs.resolve-tags.outputs.omni_base }}
-            sglang.model.default=OpenMOSS-Team/MOSS-Transcribe-Diarize
-          cache-from: type=gha,scope=sglang-omni-asr
-          cache-to: type=gha,mode=min,scope=sglang-omni-asr
+            sglang.cann.line=8.5
+            sglang.upstream.ref=${{ needs.resolve-tags.outputs.sglang_base }}
+            sglang.upstream.digest=${{ needs.resolve-tags.outputs.upstream_digest }}
+          cache-from: type=gha,scope=sglang-cann85-asr
+          cache-to: type=gha,mode=min,scope=sglang-cann85-asr
