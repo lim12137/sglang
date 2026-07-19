@@ -1,31 +1,31 @@
-name: Build SGLang CANN 8.5 Images (latest dynamic + time tags)
+name: Build SGLang CANN 8.5 Images
 
 on:
   workflow_dispatch:
     inputs:
       time_tag:
-        description: "可选：覆盖时间 tag（默认 UTC YYYYMMDD-HHMMSS）"
+        description: "Override time tag (UTC YYYYMMDD-HHMMSS). Empty = auto"
         required: false
         default: ""
       cann_line:
-        description: "CANN 线匹配（用于解析最新动态上游）"
+        description: "CANN line prefix match"
         required: false
         default: "cann8.5"
       device:
-        description: "设备后缀：910b 或 a3"
+        description: "Device suffix: 910b or a3"
         required: false
         default: "910b"
       sglang_base:
-        description: "可选：手动指定上游（空则自动解析 main-cann8.5*-device）"
+        description: "Manual upstream image (empty = auto latest dynamic CANN 8.5)"
         required: false
         default: ""
       build_base:
-        description: "构建基础镜像（CANN 8.5 最新动态）"
+        description: "Build base image"
         type: boolean
         required: false
         default: true
       build_asr:
-        description: "构建 ASR 镜像（同后端，tag 带 -asr）"
+        description: "Build ASR image (-asr tag)"
         type: boolean
         required: false
         default: true
@@ -39,7 +39,6 @@ on:
       - ".github/workflows/build.yml"
 
 env:
-  # 动态最新：官方滚动 tag 形式 main-cann8.5.0-910b
   FALLBACK_SGLANG_BASE: lmsysorg/sglang:main-cann8.5.0-910b
   ACR_REGISTRY: crpi-fs24haezdztsodhc.cn-guangzhou.personal.cr.aliyuncs.com
   ACR_NAMESPACE: hopemyl
@@ -57,121 +56,88 @@ jobs:
       has_acr: ${{ steps.tags.outputs.has_acr }}
       upstream_digest: ${{ steps.tags.outputs.upstream_digest }}
     steps:
-      - name: Resolve CANN 8.5 latest dynamic upstream + time tag
+      - name: Resolve latest CANN 8.5 dynamic upstream + time tag
         id: tags
         env:
           ACR_PWD: ${{ secrets.ALIYUN_ACR_PWD }}
+          INPUT_TIME_TAG: ${{ github.event.inputs.time_tag }}
+          INPUT_CANN_LINE: ${{ github.event.inputs.cann_line }}
+          INPUT_DEVICE: ${{ github.event.inputs.device }}
+          INPUT_SGLANG_BASE: ${{ github.event.inputs.sglang_base }}
+          EVENT_NAME: ${{ github.event_name }}
+          FALLBACK: ${{ env.FALLBACK_SGLANG_BASE }}
         run: |
           set -euo pipefail
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.time_tag }}" ]; then
-            TIME_TAG="${{ github.event.inputs.time_tag }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "${INPUT_TIME_TAG:-}" ]; then
+            TIME_TAG="$INPUT_TIME_TAG"
           else
             TIME_TAG="$(date -u +%Y%m%d-%H%M%S)"
           fi
           TIME_TAG="$(echo "$TIME_TAG" | tr -cd 'A-Za-z0-9._-')"
-          if [ -z "$TIME_TAG" ]; then
-            TIME_TAG="$(date -u +%Y%m%d-%H%M%S)"
-          fi
+          [ -n "$TIME_TAG" ] || TIME_TAG="$(date -u +%Y%m%d-%H%M%S)"
 
-          CANN_LINE="cann8.5"
-          DEVICE="910b"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            [ -n "${{ github.event.inputs.cann_line }}" ] && CANN_LINE="${{ github.event.inputs.cann_line }}"
-            [ -n "${{ github.event.inputs.device }}" ] && DEVICE="${{ github.event.inputs.device }}"
-          fi
+          CANN_LINE="${INPUT_CANN_LINE:-cann8.5}"
+          DEVICE="${INPUT_DEVICE:-910b}"
+          [ -n "$CANN_LINE" ] || CANN_LINE="cann8.5"
+          [ -n "$DEVICE" ] || DEVICE="910b"
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.sglang_base }}" ]; then
-            SGLANG_BASE="${{ github.event.inputs.sglang_base }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "${INPUT_SGLANG_BASE:-}" ]; then
+            SGLANG_BASE="$INPUT_SGLANG_BASE"
           else
-            # 动态最新：优先 main-${CANN_LINE}*-${DEVICE}
-            # 例：main-cann8.5.0-910b
             TOKEN="$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:lmsysorg/sglang:pull" | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')"
-            TAGS_JSON="$(curl -fsSL -H "Authorization: Bearer ${TOKEN}" https://registry-1.docker.io/v2/lmsysorg/sglang/tags/list)"
-            SGLANG_BASE="$(python3 - <<PY
+            curl -fsSL -H "Authorization: Bearer ${TOKEN}" https://registry-1.docker.io/v2/lmsysorg/sglang/tags/list -o /tmp/tags.json
+            SGLANG_BASE="$(CANN_LINE="$CANN_LINE" DEVICE="$DEVICE" FALLBACK="$FALLBACK" python3 - <<'PY'
 import json, os, re
-data = json.loads('''${TAGS_JSON}''')
-tags = data.get("tags") or []
-cann = os.environ.get("CANN_LINE", "cann8.5")
-device = os.environ.get("DEVICE", "910b")
-# 1) rolling main-cann8.5.x-device
+cann = os.environ["CANN_LINE"]
+device = os.environ["DEVICE"]
+fallback = os.environ.get("FALLBACK", "lmsysorg/sglang:main-cann8.5.0-910b")
+with open("/tmp/tags.json", encoding="utf-8") as f:
+    tags = json.load(f).get("tags") or []
 main_pat = re.compile(rf"^main-{re.escape(cann)}[0-9.]*-{re.escape(device)}$")
-mains = sorted([t for t in tags if main_pat.match(t)])
+mains = sorted(t for t in tags if main_pat.match(t))
 if mains:
-    # 取字典序最后（8.5.0 通常唯一）
     print(f"lmsysorg/sglang:{mains[-1]}")
-else:
-    # 2) 最高版本 v*-cann8.5*-device
-    ver_pat = re.compile(rf"^v([0-9]+(?:\.[0-9]+)*(?:\.post[0-9]+)?(?:rc[0-9]+)?)-{re.escape(cann)}[0-9.]*-{re.escape(device)}$")
-    scored = []
-    for t in tags:
-        m = ver_pat.match(t)
-        if not m:
-            continue
-        scored.append(t)
-    if scored:
-        # 简单按字符串排序不够；用 packaging 不可用时用自定义
-        def key(t):
-            body = t[1:].split("-")[0]  # 0.5.12.post1
-            parts = body.replace(".post", ".post.").split(".")
-            out = []
-            for p in parts:
-                if p.startswith("post"):
-                    out.append((1, int(p[4:] or 0)))
-                elif p.startswith("rc"):
-                    out.append((0, int(p[2:] or 0)))
-                else:
-                    try:
-                        out.append((2, int(p)))
-                    except ValueError:
-                        out.append((2, 0))
-            return out
-        best = sorted(scored, key=key)[-1]
-        print(f"lmsysorg/sglang:{best}")
-    else:
-        print(os.environ.get("FALLBACK", "lmsysorg/sglang:main-cann8.5.0-910b"))
+    raise SystemExit(0)
+ver_pat = re.compile(rf"^v(.+?)-{re.escape(cann)}[0-9.]*-{re.escape(device)}$")
+cands = [t for t in tags if ver_pat.match(t)]
+if not cands:
+    print(fallback)
+    raise SystemExit(0)
+
+def score(tag: str):
+    body = tag[1:].split("-", 1)[0]
+    nums = []
+    for part in re.split(r"[^0-9]+", body):
+        if part.isdigit():
+            nums.append(int(part))
+    return nums
+
+best = sorted(cands, key=score)[-1]
+print(f"lmsysorg/sglang:{best}")
 PY
 )"
           fi
 
-          # 解析 digest 便于追溯
-          DIGEST="$(docker buildx imagetools inspect "$SGLANG_BASE" --format '{{if .Manifest.Digest}}{{.Manifest.Digest}}{{else}}{{json .}}{{end}}' 2>/dev/null || true)"
-          if [ -z "$DIGEST" ] || echo "$DIGEST" | grep -q '{'; then
-            DIGEST="$(docker buildx imagetools inspect "$SGLANG_BASE" --format '{{json .Manifest}}' | python3 -c 'import sys,json; m=json.load(sys.stdin); print(m.get("digest",""))' 2>/dev/null || true)"
-          fi
+          DIGEST="$(docker buildx imagetools inspect "$SGLANG_BASE" --format '{{json .Manifest}}' 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("digest",""))' || true)"
           [ -n "$DIGEST" ] || DIGEST="unknown"
 
-          # 平台：CANN 910b 镜像多为 multi-arch；默认 arm64（昇腾服务器）
-          BASE_PLATFORM="linux/arm64"
-
-          BASE_TAG="$TIME_TAG"
-          ASR_TAG="${TIME_TAG}-asr"
-
-          if [ -n "${ACR_PWD:-}" ]; then
-            HAS_ACR=true
-          else
-            HAS_ACR=false
-            echo "::warning::ALIYUN_ACR_PWD empty; push GHCR only"
-          fi
+          if [ -n "${ACR_PWD:-}" ]; then HAS_ACR=true; else HAS_ACR=false; echo "::warning::ALIYUN_ACR_PWD empty; GHCR only"; fi
 
           {
             echo "time_tag=$TIME_TAG"
-            echo "base_tag=$BASE_TAG"
-            echo "asr_tag=$ASR_TAG"
+            echo "base_tag=$TIME_TAG"
+            echo "asr_tag=${TIME_TAG}-asr"
             echo "sglang_base=$SGLANG_BASE"
-            echo "base_platform=$BASE_PLATFORM"
+            echo "base_platform=linux/arm64"
             echo "has_acr=$HAS_ACR"
             echo "upstream_digest=$DIGEST"
           } >> "$GITHUB_OUTPUT"
 
           echo "TIME_TAG=$TIME_TAG"
           echo "SGLANG_BASE=$SGLANG_BASE"
-          echo "UPSTREAM_DIGEST=$DIGEST"
-          echo "BASE_TAG=$BASE_TAG ASR_TAG=$ASR_TAG HAS_ACR=$HAS_ACR"
-        env:
-          CANN_LINE: ${{ github.event.inputs.cann_line || 'cann8.5' }}
-          DEVICE: ${{ github.event.inputs.device || '910b' }}
-          FALLBACK: ${{ env.FALLBACK_SGLANG_BASE }}
+          echo "DIGEST=$DIGEST"
+          echo "HAS_ACR=$HAS_ACR"
 
   build-base:
     needs: resolve-tags
@@ -185,7 +151,6 @@ PY
 
       - name: Free disk space
         run: |
-          df -h /
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
           sudo docker system prune --all --force || true
           df -h /
@@ -198,8 +163,9 @@ PY
 
       - name: Verify upstream
         run: |
+          echo "upstream=${{ needs.resolve-tags.outputs.sglang_base }}"
+          echo "digest=${{ needs.resolve-tags.outputs.upstream_digest }}"
           docker buildx imagetools inspect "${{ needs.resolve-tags.outputs.sglang_base }}"
-          echo "Using upstream digest ${{ needs.resolve-tags.outputs.upstream_digest }}"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -216,7 +182,7 @@ PY
           username: hopemyl
           password: ${{ secrets.ALIYUN_ACR_PWD }}
 
-      - name: Compose tags (base)
+      - name: Compose tags
         id: tags
         run: |
           OWNER="${{ github.repository_owner }}"
@@ -233,12 +199,14 @@ PY
               echo "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:cann8.5-latest"
             } >> /tmp/tags.txt
           fi
-          echo "tags<<EOF" >> "$GITHUB_OUTPUT"
-          cat /tmp/tags.txt >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOF"
+            cat /tmp/tags.txt
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
           cat /tmp/tags.txt
 
-      - name: Build and push base (time tag)
+      - name: Build and push base
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -271,7 +239,6 @@ PY
 
       - name: Free disk space
         run: |
-          df -h /
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
           sudo docker system prune --all --force || true
           df -h /
@@ -297,7 +264,7 @@ PY
           username: hopemyl
           password: ${{ secrets.ALIYUN_ACR_PWD }}
 
-      - name: Compose tags (asr)
+      - name: Compose tags
         id: tags
         run: |
           OWNER="${{ github.repository_owner }}"
@@ -314,12 +281,14 @@ PY
               echo "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:cann8.5-latest-asr"
             } >> /tmp/tags.txt
           fi
-          echo "tags<<EOF" >> "$GITHUB_OUTPUT"
-          cat /tmp/tags.txt >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOF"
+            cat /tmp/tags.txt
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
           cat /tmp/tags.txt
 
-      - name: Build and push ASR (same CANN 8.5 backend, time-asr tag)
+      - name: Build and push ASR
         uses: docker/build-push-action@v6
         with:
           context: .
