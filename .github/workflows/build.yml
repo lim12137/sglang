@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       time_tag:
-        description: "Override time tag (UTC YYYYMMDD-HHMMSS). Empty = auto"
+        description: "Override date tag (YYYYMMDD or YYYYMMDD-cann8.5). Empty = today UTC date + cann8.5"
         required: false
         default: ""
       cann_line:
@@ -58,7 +58,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve latest CANN 8.5 dynamic upstream + time tag
+      - name: Resolve latest CANN 8.5 dynamic upstream + date-cann8.5 tags
         id: tags
         env:
           ACR_PWD: ${{ secrets.ALIYUN_ACR_PWD }}

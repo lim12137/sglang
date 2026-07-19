@@ -1,30 +1,28 @@
-# SGLang（CANN 8.5 最新动态 + 时间 Tag）
+# SGLang（CANN 8.5 最新动态 + 日期 Tag）
 
 仓库：https://github.com/lim12137/sglang
 
-## 策略
+## 标签策略
 
 | 镜像 | 上游 | 发布 Tag |
 |------|------|----------|
-| **基础** | 自动解析 `lmsysorg/sglang` 的 **CANN 8.5 最新动态**（优先 `main-cann8.5.0-910b`） | `<UTC时间>` / `latest` / `cann8.5-latest` |
-| **ASR** | **同一 CANN 8.5 后端** | `<UTC时间>-asr` / `latest-asr` / `cann8.5-latest-asr` |
+| **基础** | 自动解析 CANN 8.5 最新动态（优先 `main-cann8.5.0-910b`） | `YYYYMMDD-cann8.5` / `latest` / `cann8.5-latest` |
+| **ASR** | 同一 CANN 8.5 后端 | `YYYYMMDD-cann8.5-asr` / `latest-asr` / `cann8.5-latest-asr` |
 
 示例：
 
 ```text
-ghcr.io/lim12137/sglang:20260719-043000
-ghcr.io/lim12137/sglang:20260719-043000-asr
-crpi-fs24haezdztsodhc.cn-guangzhou.personal.cr.aliyuncs.com/hopemyl/sglang:20260719-043000
+ghcr.io/lim12137/sglang:20260719-cann8.5
+ghcr.io/lim12137/sglang:20260719-cann8.5-asr
+crpi-fs24haezdztsodhc.cn-guangzhou.personal.cr.aliyuncs.com/hopemyl/sglang:20260719-cann8.5
 ```
 
-每次构建会记录上游 digest 到 label，便于追溯「当时的最新动态版本」。
+同一天多次构建会覆盖同日 tag（按日期锁定 + cann8.5 标识）。
 
-## 本地触发
+## 触发
 
 ```powershell
 gh workflow run build.yml -R lim12137/sglang
-# 仅基础：
-gh workflow run build.yml -R lim12137/sglang -f build_base=true -f build_asr=false
+# 指定日期：
+gh workflow run build.yml -R lim12137/sglang -f time_tag=20260719
 ```
-
-Secret：`ALIYUN_ACR_PWD`（已支持 GHCR+ACR）

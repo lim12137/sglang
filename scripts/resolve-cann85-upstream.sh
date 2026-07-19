@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Resolve latest dynamic lmsysorg/sglang CANN 8.5 upstream + time tags.
-# Outputs github actions style key=value lines on stdout for GITHUB_OUTPUT append.
+# Resolve latest dynamic lmsysorg/sglang CANN 8.5 upstream + date tags.
+# Tag format:
+#   base: YYYYMMDD-cann8.5
+#   asr:  YYYYMMDD-cann8.5-asr
 set -euo pipefail
 
 EVENT_NAME="${EVENT_NAME:-push}"
@@ -11,18 +13,30 @@ INPUT_SGLANG_BASE="${INPUT_SGLANG_BASE:-}"
 FALLBACK="${FALLBACK:-lmsysorg/sglang:main-cann8.5.0-910b}"
 ACR_PWD="${ACR_PWD:-}"
 
-if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_TIME_TAG" ]; then
-  TIME_TAG="$INPUT_TIME_TAG"
-else
-  TIME_TAG="$(date -u +%Y%m%d-%H%M%S)"
-fi
-TIME_TAG="$(echo "$TIME_TAG" | tr -cd 'A-Za-z0-9._-')"
-[ -n "$TIME_TAG" ] || TIME_TAG="$(date -u +%Y%m%d-%H%M%S)"
-
 CANN_LINE="${INPUT_CANN_LINE:-cann8.5}"
 DEVICE="${INPUT_DEVICE:-910b}"
 [ -n "$CANN_LINE" ] || CANN_LINE="cann8.5"
 [ -n "$DEVICE" ] || DEVICE="910b"
+# normalize cann line for docker tag safety
+CANN_MARK="$(echo "$CANN_LINE" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9._-')"
+[ -n "$CANN_MARK" ] || CANN_MARK="cann8.5"
+
+if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_TIME_TAG" ]; then
+  # allow override: raw date (20260719) or full tag (20260719-cann8.5)
+  RAW="$(echo "$INPUT_TIME_TAG" | tr -cd 'A-Za-z0-9._-')"
+  if echo "$RAW" | grep -Eq "${CANN_MARK}"; then
+    BASE_TAG="$RAW"
+  else
+    BASE_TAG="${RAW}-${CANN_MARK}"
+  fi
+else
+  DATE_TAG="$(date -u +%Y%m%d)"
+  BASE_TAG="${DATE_TAG}-${CANN_MARK}"
+fi
+
+# strip trailing -asr if user accidentally passes asr tag as override
+BASE_TAG="$(echo "$BASE_TAG" | sed -E 's/-asr$//')"
+ASR_TAG="${BASE_TAG}-asr"
 
 if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_SGLANG_BASE" ]; then
   SGLANG_BASE="$INPUT_SGLANG_BASE"
@@ -71,13 +85,13 @@ fi
 if [ -n "$ACR_PWD" ]; then HAS_ACR=true; else HAS_ACR=false; fi
 
 cat <<EOF
-time_tag=${TIME_TAG}
-base_tag=${TIME_TAG}
-asr_tag=${TIME_TAG}-asr
+time_tag=${BASE_TAG}
+base_tag=${BASE_TAG}
+asr_tag=${ASR_TAG}
 sglang_base=${SGLANG_BASE}
 base_platform=linux/arm64
 has_acr=${HAS_ACR}
 upstream_digest=${DIGEST}
 EOF
 
-echo "Resolved TIME_TAG=${TIME_TAG} SGLANG_BASE=${SGLANG_BASE} DIGEST=${DIGEST} HAS_ACR=${HAS_ACR}" >&2
+echo "Resolved BASE_TAG=${BASE_TAG} ASR_TAG=${ASR_TAG} SGLANG_BASE=${SGLANG_BASE} DIGEST=${DIGEST} HAS_ACR=${HAS_ACR}" >&2
