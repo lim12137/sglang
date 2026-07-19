@@ -21,6 +21,9 @@ crpi-fs24haezdztsodhc.cn-guangzhou.personal.cr.aliyuncs.com/hopemyl/sglang:20260
 
 ## 触发
 
+**仅手动** workflow_dispatch，push **不会**自动构建。
+
+
 ```powershell
 gh workflow run build.yml -R lim12137/sglang
 # 指定日期：

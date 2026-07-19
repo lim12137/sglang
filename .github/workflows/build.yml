@@ -1,4 +1,4 @@
-name: Build SGLang CANN 8.5 Images
+name: Build SGLang CANN 8.5 Images (manual)
 
 on:
   workflow_dispatch:
@@ -29,14 +29,6 @@ on:
         type: boolean
         required: false
         default: true
-  push:
-    branches: [main, master]
-    paths:
-      - "Dockerfile"
-      - "Dockerfile.asr"
-      - "requirements-asr.txt"
-      - "scripts/**"
-      - ".github/workflows/build.yml"
 
 env:
   FALLBACK_SGLANG_BASE: lmsysorg/sglang:main-cann8.5.0-910b
