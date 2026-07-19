@@ -1,0 +1,245 @@
+name: Build SGLang CANN Images (latest upstream, time tags)
+
+on:
+  workflow_dispatch:
+    inputs:
+      time_tag:
+        description: "可选：覆盖时间 tag（默认 UTC YYYYMMDD-HHMMSS）"
+        required: false
+        default: ""
+      sglang_base:
+        description: "SGLang 上游基础镜像（默认最新 CANN 8.5 main 线）"
+        required: false
+        default: "lmsysorg/sglang:main-cann8.5.0-910b"
+      cann_base:
+        description: "ASR 用 CANN 基础镜像（默认 8.5 最新固定线）"
+        required: false
+        default: "ascendai/cann:8.5.1-910b-ubuntu22.04-py3.11"
+      build_base:
+        description: "构建 SGLang 基础镜像"
+        type: boolean
+        required: false
+        default: true
+      build_asr:
+        description: "构建 ASR 匹配镜像（tag 带 -asr）"
+        type: boolean
+        required: false
+        default: true
+  push:
+    branches: [main, master]
+    paths:
+      - "Dockerfile"
+      - "Dockerfile.asr"
+      - "requirements-asr.txt"
+      - "verify/**"
+      - ".github/workflows/build.yml"
+
+env:
+  DEFAULT_SGLANG_BASE: lmsysorg/sglang:main-cann8.5.0-910b
+  DEFAULT_CANN_BASE: ascendai/cann:8.5.1-910b-ubuntu22.04-py3.11
+  ACR_REGISTRY: crpi-fs24haezdztsodhc.cn-guangzhou.personal.cr.aliyuncs.com
+  ACR_NAMESPACE: hopemyl
+  IMAGE_NAME: sglang-cann
+
+jobs:
+  resolve-tags:
+    runs-on: ubuntu-22.04
+    outputs:
+      time_tag: ${{ steps.tags.outputs.time_tag }}
+      base_tag: ${{ steps.tags.outputs.base_tag }}
+      asr_tag: ${{ steps.tags.outputs.asr_tag }}
+      sglang_base: ${{ steps.tags.outputs.sglang_base }}
+      cann_base: ${{ steps.tags.outputs.cann_base }}
+    steps:
+      - name: Resolve time tag and upstream
+        id: tags
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.time_tag }}" ]; then
+            TIME_TAG="${{ github.event.inputs.time_tag }}"
+          else
+            TIME_TAG="$(date -u +%Y%m%d-%H%M%S)"
+          fi
+          # 清洗：只保留 tag 安全字符
+          TIME_TAG="$(echo "$TIME_TAG" | tr -cd 'A-Za-z0-9._-')"
+          if [ -z "$TIME_TAG" ]; then
+            TIME_TAG="$(date -u +%Y%m%d-%H%M%S)"
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.sglang_base }}" ]; then
+            SGLANG_BASE="${{ github.event.inputs.sglang_base }}"
+          else
+            SGLANG_BASE="${{ env.DEFAULT_SGLANG_BASE }}"
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.cann_base }}" ]; then
+            CANN_BASE="${{ github.event.inputs.cann_base }}"
+          else
+            CANN_BASE="${{ env.DEFAULT_CANN_BASE }}"
+          fi
+
+          BASE_TAG="$TIME_TAG"
+          ASR_TAG="${TIME_TAG}-asr"
+
+          {
+            echo "time_tag=$TIME_TAG"
+            echo "base_tag=$BASE_TAG"
+            echo "asr_tag=$ASR_TAG"
+            echo "sglang_base=$SGLANG_BASE"
+            echo "cann_base=$CANN_BASE"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "TIME_TAG=$TIME_TAG"
+          echo "BASE_TAG=$BASE_TAG"
+          echo "ASR_TAG=$ASR_TAG"
+          echo "SGLANG_BASE=$SGLANG_BASE"
+          echo "CANN_BASE=$CANN_BASE"
+
+  build-base:
+    needs: resolve-tags
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_base }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          sudo docker system prune --all --force || true
+          df -h /
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Verify upstream SGLang base
+        run: |
+          docker buildx imagetools inspect "${{ needs.resolve-tags.outputs.sglang_base }}" --format '{{json .Manifest}}' > /tmp/sglang-manifest.json
+          python3 - <<'PY'
+          import json
+          with open("/tmp/sglang-manifest.json", encoding="utf-8") as f:
+              m = json.load(f)
+          platforms = [i.get("platform", {}) for i in m.get("manifests", [])]
+          if m.get("manifests"):
+              ok = any(p.get("os") == "linux" and p.get("architecture") == "arm64" for p in platforms)
+              if not ok:
+                  raise SystemExit(f"upstream has no linux/arm64: {m.get('digest')}")
+          print("SGLANG_UPSTREAM_OK", m.get("digest", "single-manifest"))
+          PY
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Aliyun ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_REGISTRY }}
+          username: hopemyl
+          password: ${{ secrets.ALIYUN_ACR_PWD }}
+
+      - name: Build and push SGLang base (time tag)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          build-args: |
+            SGLANG_BASE=${{ needs.resolve-tags.outputs.sglang_base }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-tags.outputs.base_tag }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-tags.outputs.base_tag }}
+            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.created=${{ needs.resolve-tags.outputs.time_tag }}
+            sglang.image.role=base
+            sglang.upstream=${{ needs.resolve-tags.outputs.sglang_base }}
+          cache-from: type=gha,scope=sglang-cann-base
+          cache-to: type=gha,mode=min,scope=sglang-cann-base
+
+  build-asr:
+    needs: resolve-tags
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_asr }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift || true
+          sudo docker system prune --all --force || true
+          df -h /
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Verify CANN base ARM64
+        run: |
+          docker buildx imagetools inspect "${{ needs.resolve-tags.outputs.cann_base }}" --format '{{json .Manifest}}' > /tmp/cann-manifest.json
+          python3 - <<'PY'
+          import json
+          with open("/tmp/cann-manifest.json", encoding="utf-8") as f:
+              m = json.load(f)
+          platforms = [i.get("platform", {}) for i in m.get("manifests", [])]
+          if not any(p.get("os") == "linux" and p.get("architecture") == "arm64" for p in platforms):
+              raise SystemExit(f"CANN base has no linux/arm64: {m.get('digest')}")
+          print("CANN_BASE_ARM64_OK", m.get("digest"))
+          PY
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Aliyun ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_REGISTRY }}
+          username: hopemyl
+          password: ${{ secrets.ALIYUN_ACR_PWD }}
+
+      - name: Build and push ASR image (time-asr tag)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.asr
+          platforms: linux/arm64
+          build-args: |
+            CANN_BASE=${{ needs.resolve-tags.outputs.cann_base }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-tags.outputs.asr_tag }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest-asr
+            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-tags.outputs.asr_tag }}
+            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest-asr
+          labels: |
+            org.opencontainers.image.created=${{ needs.resolve-tags.outputs.time_tag }}
+            sglang.image.role=asr
+            cann.upstream=${{ needs.resolve-tags.outputs.cann_base }}
+          cache-from: type=gha,scope=sglang-cann-asr
+          cache-to: type=gha,mode=min,scope=sglang-cann-asr
