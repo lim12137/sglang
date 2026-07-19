@@ -1,50 +1,41 @@
-# ASR 匹配镜像：基于最新 CANN 8.5 线基础，发布 tag 形如 <time>-asr
-ARG CANN_BASE=ascendai/cann:8.5.1-910b-ubuntu22.04-py3.11
-FROM ${CANN_BASE}
+# ASR 专用镜像：对齐官方 MOSS-Transcribe-Diarize cookbook
+# 文档: https://sgl-project.github.io/sglang-omni/cookbook/moss_transcribe_diarize.html
+#
+# 官方路径（CUDA / NVIDIA）：
+#   docker pull lmsysorg/sglang-omni:latest
+#   sglang serve --model-path OpenMOSS-Team/MOSS-Transcribe-Diarize \
+#     --host 0.0.0.0 --port 30000 --omni --keep-mm-feature \
+#     --chunked-prefill-size -1 --max-running-requests 1
+#
+# 说明：cookbook 仅给出 NVIDIA GPU 部署；不包含 Ascend/CANN。
+ARG SGLANG_OMNI_BASE=lmsysorg/sglang-omni:latest
+FROM ${SGLANG_OMNI_BASE}
 
-ARG NANO_REV=2a2778765678ab5f15239b9dc181839e892d7006
-ARG VAD_CAMPP_REV=eba9c2ed4fed2adc838322376d8df6278b82c2bc
-ARG TORCH_NPU_WHEEL=https://gitcode.com/Ascend/pytorch/releases/download/v7.3.1-pytorch2.9.0/torch_npu-2.9.0.post1-cp311-cp311-manylinux_2_28_aarch64.whl
+LABEL org.opencontainers.image.title="sglang-omni-moss-transcribe-diarize" \
+      org.opencontainers.image.description="SGLang-Omni dedicated image for MOSS-Transcribe-Diarize (cookbook-aligned)" \
+      sglang.image.role="asr" \
+      sglang.model.default="OpenMOSS-Team/MOSS-Transcribe-Diarize" \
+      sglang.omni.cookbook="moss_transcribe_diarize"
 
-LABEL org.opencontainers.image.title="sglang-cann-asr" \
-      org.opencontainers.image.description="ASR matched image (latest CANN 8.5 line; publish with time-asr tag)" \
-      cann.line="8.5" \
-      sglang.image.role="asr"
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        ffmpeg \
-        git \
-        libsndfile1 && \
-    rm -rf /var/lib/apt/lists/*
-
-COPY requirements-asr.txt /tmp/requirements.txt
+# cookbook 依赖 torchaudio；镜像内尽量保证可用（若 base 已有则 no-op）
 RUN python3 -m pip install --no-cache-dir --upgrade pip && \
-    python3 -m pip install --no-cache-dir \
-        torch==2.9.0 \
-        torchaudio==2.9.0 && \
-    python3 -m pip install --no-cache-dir "${TORCH_NPU_WHEEL}" && \
-    python3 -m pip install --no-cache-dir -r /tmp/requirements.txt
+    python3 -c "import torchaudio; print('torchaudio', torchaudio.__version__)" \
+      || python3 -m pip install --no-cache-dir torchaudio
 
-RUN git clone https://atomgit.com/gyccc/FunAudioLLM-Fun-ASR-Nano-2512-NPU.git /opt/src/funasr-nano && \
-    git -C /opt/src/funasr-nano checkout "${NANO_REV}" && \
-    git clone https://atomgit.com/Ascend-SACT/FunASR_VAD-SenseVoiceSmall-CAMPPlus.git /opt/src/funasr-vad-campp && \
-    git -C /opt/src/funasr-vad-campp checkout "${VAD_CAMPP_REV}"
+# 默认模型与服务参数（运行时可覆盖）
+ENV MODEL_PATH=OpenMOSS-Team/MOSS-Transcribe-Diarize \
+    SGLANG_HOST=0.0.0.0 \
+    SGLANG_PORT=30000 \
+    HF_HOME=/root/.cache/huggingface
 
-COPY verify/verify_npu_models.py /opt/verify/verify_npu_models.py
-COPY verify/entrypoint.sh /usr/local/bin/verify-npu-models
+COPY scripts/serve-moss-transcribe-diarize.sh /usr/local/bin/serve-moss-transcribe-diarize
+RUN chmod 0755 /usr/local/bin/serve-moss-transcribe-diarize
 
-ENV ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
-ENV LD_LIBRARY_PATH=${ASCEND_HOME_PATH}/lib64:${LD_LIBRARY_PATH}
-ENV PYTHONPATH=/opt/src/funasr-nano:/opt/src/funasr-vad-campp:${PYTHONPATH}
-ENV HF_HUB_OFFLINE=1
-ENV HF_DATASETS_OFFLINE=1
-ENV MODELSCOPE_OFFLINE=1
+# 轻量存在性检查：sglang CLI 可用（不在构建期拉模型）
+RUN command -v sglang >/dev/null 2>&1 \
+      || python3 -c "import sglang; print('sglang import ok')" \
+      || echo "WARN: sglang CLI not verified at build time"
 
-RUN chmod 0755 /usr/local/bin/verify-npu-models && \
-    python3 -m py_compile /opt/verify/verify_npu_models.py && \
-    python3 -m importlib.metadata 2>/dev/null || true && \
-    python3 -c "from importlib.metadata import version; packages = ('torch', 'torchaudio', 'torch-npu', 'funasr', 'modelscope'); [print(f'{package}={version(package)}') for package in packages]"
-
-WORKDIR /workspace
-ENTRYPOINT ["verify-npu-models"]
+EXPOSE 30000
+WORKDIR /sgl-workspace
+ENTRYPOINT ["serve-moss-transcribe-diarize"]
