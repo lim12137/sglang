@@ -35,7 +35,7 @@ on:
       - "Dockerfile"
       - "Dockerfile.asr"
       - "requirements-asr.txt"
-      - "scripts/serve-moss-transcribe-diarize.sh"
+      - "scripts/**"
       - ".github/workflows/build.yml"
 
 env:
@@ -56,6 +56,8 @@ jobs:
       has_acr: ${{ steps.tags.outputs.has_acr }}
       upstream_digest: ${{ steps.tags.outputs.upstream_digest }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Resolve latest CANN 8.5 dynamic upstream + time tag
         id: tags
         env:
@@ -67,77 +69,8 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           FALLBACK: ${{ env.FALLBACK_SGLANG_BASE }}
         run: |
-          set -euo pipefail
-
-          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "${INPUT_TIME_TAG:-}" ]; then
-            TIME_TAG="$INPUT_TIME_TAG"
-          else
-            TIME_TAG="$(date -u +%Y%m%d-%H%M%S)"
-          fi
-          TIME_TAG="$(echo "$TIME_TAG" | tr -cd 'A-Za-z0-9._-')"
-          [ -n "$TIME_TAG" ] || TIME_TAG="$(date -u +%Y%m%d-%H%M%S)"
-
-          CANN_LINE="${INPUT_CANN_LINE:-cann8.5}"
-          DEVICE="${INPUT_DEVICE:-910b}"
-          [ -n "$CANN_LINE" ] || CANN_LINE="cann8.5"
-          [ -n "$DEVICE" ] || DEVICE="910b"
-
-          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "${INPUT_SGLANG_BASE:-}" ]; then
-            SGLANG_BASE="$INPUT_SGLANG_BASE"
-          else
-            TOKEN="$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:lmsysorg/sglang:pull" | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')"
-            curl -fsSL -H "Authorization: Bearer ${TOKEN}" https://registry-1.docker.io/v2/lmsysorg/sglang/tags/list -o /tmp/tags.json
-            SGLANG_BASE="$(CANN_LINE="$CANN_LINE" DEVICE="$DEVICE" FALLBACK="$FALLBACK" python3 - <<'PY'
-import json, os, re
-cann = os.environ["CANN_LINE"]
-device = os.environ["DEVICE"]
-fallback = os.environ.get("FALLBACK", "lmsysorg/sglang:main-cann8.5.0-910b")
-with open("/tmp/tags.json", encoding="utf-8") as f:
-    tags = json.load(f).get("tags") or []
-main_pat = re.compile(rf"^main-{re.escape(cann)}[0-9.]*-{re.escape(device)}$")
-mains = sorted(t for t in tags if main_pat.match(t))
-if mains:
-    print(f"lmsysorg/sglang:{mains[-1]}")
-    raise SystemExit(0)
-ver_pat = re.compile(rf"^v(.+?)-{re.escape(cann)}[0-9.]*-{re.escape(device)}$")
-cands = [t for t in tags if ver_pat.match(t)]
-if not cands:
-    print(fallback)
-    raise SystemExit(0)
-
-def score(tag: str):
-    body = tag[1:].split("-", 1)[0]
-    nums = []
-    for part in re.split(r"[^0-9]+", body):
-        if part.isdigit():
-            nums.append(int(part))
-    return nums
-
-best = sorted(cands, key=score)[-1]
-print(f"lmsysorg/sglang:{best}")
-PY
-)"
-          fi
-
-          DIGEST="$(docker buildx imagetools inspect "$SGLANG_BASE" --format '{{json .Manifest}}' 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("digest",""))' || true)"
-          [ -n "$DIGEST" ] || DIGEST="unknown"
-
-          if [ -n "${ACR_PWD:-}" ]; then HAS_ACR=true; else HAS_ACR=false; echo "::warning::ALIYUN_ACR_PWD empty; GHCR only"; fi
-
-          {
-            echo "time_tag=$TIME_TAG"
-            echo "base_tag=$TIME_TAG"
-            echo "asr_tag=${TIME_TAG}-asr"
-            echo "sglang_base=$SGLANG_BASE"
-            echo "base_platform=linux/arm64"
-            echo "has_acr=$HAS_ACR"
-            echo "upstream_digest=$DIGEST"
-          } >> "$GITHUB_OUTPUT"
-
-          echo "TIME_TAG=$TIME_TAG"
-          echo "SGLANG_BASE=$SGLANG_BASE"
-          echo "DIGEST=$DIGEST"
-          echo "HAS_ACR=$HAS_ACR"
+          chmod +x scripts/resolve-cann85-upstream.sh
+          scripts/resolve-cann85-upstream.sh >> "$GITHUB_OUTPUT"
 
   build-base:
     needs: resolve-tags
